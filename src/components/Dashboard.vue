@@ -205,6 +205,30 @@ const isEspOnline = computed(() => {
   return diffMs <= 180000; // 3 minutes in ms
 });
 
+// --- ALERTAS (solo ADMIN) ---
+const alertsHistory = ref([])
+
+const formatDuration = (seconds) => {
+  if (seconds == null) return 'En curso'
+  if (seconds < 60) return `${seconds}s`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  if (m < 60) return `${m}m ${s}s`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h}h ${rm}m`
+}
+
+const fetchAlerts = async () => {
+  if (user.value.role !== 'ADMIN') return
+  try {
+    const res = await axios.get('http://localhost:3001/api/alerts', getAuthHeaders())
+    alertsHistory.value = res.data
+  } catch (err) {
+    console.error('Error fetching alerts:', err)
+  }
+}
+
 const fetchHistory = async (page = 1) => {
   try {
     const res = await axios.get(`http://localhost:3001/api/readings?page=${page}&limit=20`, getAuthHeaders())
@@ -247,9 +271,11 @@ onMounted(() => {
   fetchSettings()
   fetchLatest()
   fetchHistory()
+  fetchAlerts()
   setInterval(() => {
     fetchLatest()
     if (currentPage.value === 1) fetchHistory(1)
+    fetchAlerts()
   }, 60000)
 })
 </script>
@@ -390,6 +416,54 @@ onMounted(() => {
           <button @click="fetchHistory(currentPage - 1)" :disabled="currentPage === 1" class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Anterior</button>
           <span class="text-sm text-gray-500 font-medium">Página {{ currentPage }} de {{ totalPages }}</span>
           <button @click="fetchHistory(currentPage + 1)" :disabled="currentPage === totalPages" class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Siguiente</button>
+        </div>
+      </div>
+      <!-- Historial de Alertas (solo ADMIN) -->
+      <div v-if="user.role === 'ADMIN'" class="bg-white rounded-xl shadow-sm border border-gray-100 p-0 overflow-hidden mt-8">
+        <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+          <h3 class="text-lg font-semibold text-pi-blue-900 m-0">Historial de Alertas</h3>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead class="text-xs text-gray-500 uppercase bg-white border-b border-gray-100">
+              <tr>
+                <th class="px-4 py-3 font-medium">Variable</th>
+                <th class="px-4 py-3 font-medium">Tipo</th>
+                <th class="px-4 py-3 font-medium">Valor extremo</th>
+                <th class="px-4 py-3 font-medium">Umbral</th>
+                <th class="px-4 py-3 font-medium">Inicio</th>
+                <th class="px-4 py-3 font-medium">Fin</th>
+                <th class="px-4 py-3 font-medium">Duración</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              <tr v-if="alertsHistory.length === 0">
+                <td colspan="7" class="px-4 py-6 text-center text-gray-400">Sin alertas registradas</td>
+              </tr>
+              <tr v-for="a in alertsHistory" :key="a.id"
+                  class="hover:bg-gray-50 transition-colors"
+                  :class="a.fin === null ? 'bg-red-50' : ''">
+                <td class="px-4 py-3 whitespace-nowrap capitalize font-medium text-pi-gray-700">{{ a.variable }}</td>
+                <td class="px-4 py-3 whitespace-nowrap">
+                  <span class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                        :class="a.tipo === 'alto' ? 'bg-red-100 text-pi-danger' : 'bg-blue-100 text-blue-700'">
+                    {{ a.tipo === 'alto' ? 'Alto' : 'Bajo' }}
+                  </span>
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap font-mono">
+                  {{ a.valor_extremo }}{{ a.variable === 'temperatura' ? ' °C' : ' %' }}
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap font-mono text-gray-500">
+                  {{ a.tipo === 'alto' ? '> ' : '< ' }}{{ a.umbral }}{{ a.variable === 'temperatura' ? ' °C' : ' %' }}
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap text-pi-gray-700">{{ toEcuadorTime(a.inicio) }}</td>
+                <td class="px-4 py-3 whitespace-nowrap" :class="a.fin === null ? 'text-pi-danger font-semibold' : 'text-pi-gray-700'">
+                  {{ a.fin ? toEcuadorTime(a.fin) : 'En curso' }}
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap text-gray-600">{{ formatDuration(a.duracion_segundos) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </main>

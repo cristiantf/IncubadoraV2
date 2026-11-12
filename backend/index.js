@@ -182,6 +182,59 @@ app.get('/api/readings/latest', authMiddleware, async (req, res) => {
   }
 });
 
+// --- ALERTS ---
+app.get('/api/alerts', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      'SELECT * FROM alert_events ORDER BY inicio DESC LIMIT 200'
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// Evalúa una variable contra sus umbrales y abre/cierra eventos en alert_events.
+// createdAt: string ISO 8601 UTC del ThingSpeak feed.
+const processAlertVariable = async (variable, value, min, max, createdAt) => {
+  const tsDate = new Date(createdAt);
+  const tsMySQL = tsDate.toISOString().slice(0, 19).replace('T', ' ');
+  const isLow = value < min;
+  const isHigh = value > max;
+  const outOfRange = isLow || isHigh;
+
+  const [open] = await db.execute(
+    'SELECT * FROM alert_events WHERE variable = ? AND fin IS NULL ORDER BY inicio DESC LIMIT 1',
+    [variable]
+  );
+
+  if (outOfRange) {
+    if (open.length === 0) {
+      const tipo = isLow ? 'bajo' : 'alto';
+      const umbral = isLow ? min : max;
+      await db.execute(
+        'INSERT INTO alert_events (variable, tipo, valor_extremo, umbral, inicio) VALUES (?, ?, ?, ?, ?)',
+        [variable, tipo, value, umbral, tsMySQL]
+      );
+      console.log(`[Alertas] ABIERTO: ${variable} ${tipo} (valor=${value}, umbral=${umbral})`);
+    } else {
+      const ev = open[0];
+      const worse = ev.tipo === 'bajo' ? value < ev.valor_extremo : value > ev.valor_extremo;
+      if (worse) {
+        await db.execute('UPDATE alert_events SET valor_extremo = ? WHERE id = ?', [value, ev.id]);
+      }
+    }
+  } else if (open.length > 0) {
+    const ev = open[0];
+    const duracion = Math.round((tsDate - new Date(ev.inicio)) / 1000);
+    await db.execute(
+      'UPDATE alert_events SET fin = ?, duracion_segundos = ? WHERE id = ?',
+      [tsMySQL, Math.max(0, duracion), ev.id]
+    );
+    console.log(`[Alertas] CERRADO: ${variable}, duración ${duracion}s`);
+  }
+};
+
 // --- WORKER (Fetch from ThingSpeak) ---
 const THINGSPEAK_CHANNEL_ID = '3442278';
 const THINGSPEAK_API_KEY = 'J92EB8NUEOJF1IAN';
@@ -192,19 +245,28 @@ const fetchThingSpeakData = async () => {
     const response = await axios.get(url);
     const feeds = response.data.feeds;
 
-    if (feeds && feeds.length > 0) {
-      let inserted = 0;
-      for (const feed of feeds) {
-        if (!feed.field1 || !feed.field2) continue;
-        const mysqlDate = new Date(feed.created_at).toISOString().slice(0, 19).replace('T', ' ');
-        const [result] = await db.execute(
-          'INSERT IGNORE INTO readings (temperatura, humedad, timestamp) VALUES (?, ?, ?)',
-          [parseFloat(feed.field1), parseFloat(feed.field2), mysqlDate]
-        );
-        if (result.affectedRows > 0) inserted++;
+    if (!feeds || feeds.length === 0) return;
+
+    // Obtener umbrales una vez por ciclo del worker
+    const [settingsRows] = await db.execute('SELECT * FROM settings WHERE id = 1');
+    const s = settingsRows[0] || { temp_min: 37.5, temp_max: 37.9, hum_min: 50, hum_max: 70 };
+
+    let inserted = 0;
+    for (const feed of feeds) {
+      if (!feed.field1 || !feed.field2) continue;
+      const mysqlDate = new Date(feed.created_at).toISOString().slice(0, 19).replace('T', ' ');
+      const [result] = await db.execute(
+        'INSERT IGNORE INTO readings (temperatura, humedad, timestamp) VALUES (?, ?, ?)',
+        [parseFloat(feed.field1), parseFloat(feed.field2), mysqlDate]
+      );
+      if (result.affectedRows > 0) {
+        inserted++;
+        // Evaluar alertas para cada lectura nueva, en orden cronológico
+        await processAlertVariable('temperatura', parseFloat(feed.field1), s.temp_min, s.temp_max, feed.created_at);
+        await processAlertVariable('humedad', parseFloat(feed.field2), s.hum_min, s.hum_max, feed.created_at);
       }
-      console.log(`[Worker] Procesados ${feeds.length} feeds, insertados ${inserted} nuevos.`);
     }
+    console.log(`[Worker] Procesados ${feeds.length} feeds, insertados ${inserted} nuevos.`);
   } catch (error) {
     console.error('[Worker] Error fetching from ThingSpeak:', error.message);
   }
