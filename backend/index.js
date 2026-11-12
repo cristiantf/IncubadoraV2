@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -254,6 +255,33 @@ app.get('/api/export/alerts.csv', authMiddleware, adminMiddleware, async (req, r
   }
 });
 
+// --- TELEGRAM ---
+const formatDurationServer = (s) => {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), sec = s % 60;
+  if (m < 60) return `${m}m ${sec}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+};
+
+const sendTelegramNotification = async (message) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return null;
+  try {
+    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: chatId,
+      text: message,
+      parse_mode: 'HTML'
+    });
+    const sentAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    console.log('[Telegram] Notificación enviada.');
+    return sentAt;
+  } catch (err) {
+    console.error('[Telegram] Error:', err.response?.data?.description || err.message);
+    return null;
+  }
+};
+
 // Evalúa una variable contra sus umbrales y abre/cierra eventos en alert_events.
 // createdAt: string ISO 8601 UTC del ThingSpeak feed.
 const processAlertVariable = async (variable, value, min, max, createdAt) => {
@@ -272,11 +300,23 @@ const processAlertVariable = async (variable, value, min, max, createdAt) => {
     if (open.length === 0) {
       const tipo = isLow ? 'bajo' : 'alto';
       const umbral = isLow ? min : max;
-      await db.execute(
+      const [ins] = await db.execute(
         'INSERT INTO alert_events (variable, tipo, valor_extremo, umbral, inicio) VALUES (?, ?, ?, ?, ?)',
         [variable, tipo, value, umbral, tsMySQL]
       );
       console.log(`[Alertas] ABIERTO: ${variable} ${tipo} (valor=${value}, umbral=${umbral})`);
+
+      const varLabel = variable === 'temperatura' ? 'Temperatura' : 'Humedad';
+      const unit     = variable === 'temperatura' ? '°C' : '%';
+      const tipoLabel = tipo === 'alto' ? 'Alta ⬆️' : 'Baja ⬇️';
+      const signo    = tipo === 'alto' ? '&gt;' : '&lt;';
+      const msg = `🚨 <b>ALERTA: ${varLabel} ${tipoLabel}</b>\n`
+                + `Valor: <b>${value}${unit}</b> (umbral: ${signo} ${umbral}${unit})\n`
+                + `Inicio: ${toEcuadorCSV(tsDate)} (Ecuador)`;
+      const sentAt = await sendTelegramNotification(msg);
+      if (sentAt) {
+        await db.execute('UPDATE alert_events SET telegram_sent_at = ? WHERE id = ?', [sentAt, ins.insertId]);
+      }
     } else {
       const ev = open[0];
       const worse = ev.tipo === 'bajo' ? value < ev.valor_extremo : value > ev.valor_extremo;
@@ -287,9 +327,18 @@ const processAlertVariable = async (variable, value, min, max, createdAt) => {
   } else if (open.length > 0) {
     const ev = open[0];
     const duracion = Math.round((tsDate - new Date(ev.inicio)) / 1000);
+
+    const varLabel = ev.variable === 'temperatura' ? 'Temperatura' : 'Humedad';
+    const unit     = ev.variable === 'temperatura' ? '°C' : '%';
+    const msg = `✅ <b>ALERTA CERRADA: ${varLabel}</b>\n`
+              + `Valor extremo: <b>${ev.valor_extremo}${unit}</b>\n`
+              + `Duración: ${formatDurationServer(Math.max(0, duracion))}\n`
+              + `Fin: ${toEcuadorCSV(tsDate)} (Ecuador)`;
+    const sentAt = await sendTelegramNotification(msg);
+
     await db.execute(
-      'UPDATE alert_events SET fin = ?, duracion_segundos = ? WHERE id = ?',
-      [tsMySQL, Math.max(0, duracion), ev.id]
+      'UPDATE alert_events SET fin = ?, duracion_segundos = ?, telegram_sent_at = ? WHERE id = ?',
+      [tsMySQL, Math.max(0, duracion), sentAt, ev.id]
     );
     console.log(`[Alertas] CERRADO: ${variable}, duración ${duracion}s`);
   }
