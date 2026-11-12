@@ -194,6 +194,66 @@ app.get('/api/alerts', authMiddleware, adminMiddleware, async (req, res) => {
   }
 });
 
+// --- EXPORT CSV ---
+// Convierte un Date de MySQL (UTC) a string para CSV en hora Ecuador.
+const toEcuadorCSV = (d) =>
+  new Date(d).toLocaleString('sv-SE', { timeZone: 'America/Guayaquil' }).replace('T', ' ');
+
+// Convierte un string de fecha en hora Ecuador a DATETIME UTC para WHERE.
+// Acepta "YYYY-MM-DD" o "YYYY-MM-DDTHH:MM:SS".
+const ecuadorToMySQL = (s) => {
+  if (!s) return null;
+  const iso = s.includes('T') ? s : `${s}T00:00:00`;
+  return new Date(`${iso}-05:00`).toISOString().slice(0, 19).replace('T', ' ');
+};
+
+const buildDateWhere = (field, desde, hasta) => {
+  const d = ecuadorToMySQL(desde);
+  const h = ecuadorToMySQL(hasta);
+  if (d && h)   return { clause: ` WHERE ${field} BETWEEN ? AND ?`, params: [d, h] };
+  if (d)        return { clause: ` WHERE ${field} >= ?`,           params: [d] };
+  if (h)        return { clause: ` WHERE ${field} <= ?`,           params: [h] };
+  return { clause: '', params: [] };
+};
+
+app.get('/api/export/readings.csv', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { clause, params } = buildDateWhere('timestamp', req.query.desde, req.query.hasta);
+    const [rows] = await db.execute(
+      `SELECT id, timestamp, temperatura, humedad FROM readings${clause} ORDER BY timestamp ASC`,
+      params
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="readings.csv"');
+    let csv = 'id,fecha_hora_ecuador,temperatura_c,humedad_pct\n';
+    for (const r of rows) {
+      csv += `${r.id},"${toEcuadorCSV(r.timestamp)}",${r.temperatura},${r.humedad}\n`;
+    }
+    res.send(csv);
+  } catch (error) {
+    res.status(500).json({ error: 'Error exportando lecturas' });
+  }
+});
+
+app.get('/api/export/alerts.csv', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { clause, params } = buildDateWhere('inicio', req.query.desde, req.query.hasta);
+    const [rows] = await db.execute(
+      `SELECT * FROM alert_events${clause} ORDER BY inicio ASC`,
+      params
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="alerts.csv"');
+    let csv = 'id,variable,tipo,valor_extremo,umbral,inicio_ecuador,fin_ecuador,duracion_segundos\n';
+    for (const a of rows) {
+      csv += `${a.id},${a.variable},${a.tipo},${a.valor_extremo},${a.umbral},"${toEcuadorCSV(a.inicio)}","${a.fin ? toEcuadorCSV(a.fin) : ''}",${a.duracion_segundos ?? ''}\n`;
+    }
+    res.send(csv);
+  } catch (error) {
+    res.status(500).json({ error: 'Error exportando alertas' });
+  }
+});
+
 // Evalúa una variable contra sus umbrales y abre/cierra eventos en alert_events.
 // createdAt: string ISO 8601 UTC del ThingSpeak feed.
 const processAlertVariable = async (variable, value, min, max, createdAt) => {

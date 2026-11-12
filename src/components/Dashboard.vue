@@ -229,6 +229,30 @@ const fetchAlerts = async () => {
   }
 }
 
+// --- EXPORT CSV ---
+const readingsFilter = ref({ desde: '', hasta: '' })
+const alertsFilter   = ref({ desde: '', hasta: '' })
+
+const exportCSV = async (type, filter) => {
+  try {
+    const p = new URLSearchParams()
+    if (filter.desde) p.append('desde', filter.desde)
+    if (filter.hasta) p.append('hasta', filter.hasta + 'T23:59:59')
+    const query = p.toString() ? '?' + p.toString() : ''
+    const res = await axios.get(
+      `http://localhost:3001/api/export/${type}.csv${query}`,
+      { ...getAuthHeaders(), responseType: 'blob' }
+    )
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(res.data)
+    link.download = `${type}_${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  } catch (err) {
+    console.error('Error exportando CSV:', err)
+  }
+}
+
 const fetchHistory = async (page = 1) => {
   try {
     const res = await axios.get(`http://localhost:3001/api/readings?page=${page}&limit=20`, getAuthHeaders())
@@ -391,8 +415,15 @@ onMounted(() => {
 
       <!-- Tabla Histórica -->
       <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-0 overflow-hidden">
-        <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <div class="px-6 py-4 border-b border-gray-100 bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <h3 class="text-lg font-semibold text-pi-blue-900 m-0">Historial de Lecturas</h3>
+          <div v-if="user.role === 'ADMIN'" class="flex flex-wrap items-center gap-2 text-sm">
+            <input v-model="readingsFilter.desde" type="date" class="border border-gray-300 rounded-lg px-2 py-1 text-gray-700" title="Desde (hora Ecuador)" />
+            <input v-model="readingsFilter.hasta" type="date" class="border border-gray-300 rounded-lg px-2 py-1 text-gray-700" title="Hasta (hora Ecuador)" />
+            <button @click="exportCSV('readings', readingsFilter)" class="bg-pi-blue-700 hover:bg-pi-blue-900 text-white px-3 py-1.5 rounded-lg font-medium transition-colors whitespace-nowrap">
+              Exportar CSV
+            </button>
+          </div>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm text-left">
@@ -420,8 +451,15 @@ onMounted(() => {
       </div>
       <!-- Historial de Alertas (solo ADMIN) -->
       <div v-if="user.role === 'ADMIN'" class="bg-white rounded-xl shadow-sm border border-gray-100 p-0 overflow-hidden mt-8">
-        <div class="px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <div class="px-6 py-4 border-b border-gray-100 bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <h3 class="text-lg font-semibold text-pi-blue-900 m-0">Historial de Alertas</h3>
+          <div class="flex flex-wrap items-center gap-2 text-sm">
+            <input v-model="alertsFilter.desde" type="date" class="border border-gray-300 rounded-lg px-2 py-1 text-gray-700" title="Desde (hora Ecuador)" />
+            <input v-model="alertsFilter.hasta" type="date" class="border border-gray-300 rounded-lg px-2 py-1 text-gray-700" title="Hasta (hora Ecuador)" />
+            <button @click="exportCSV('alerts', alertsFilter)" class="bg-pi-blue-700 hover:bg-pi-blue-900 text-white px-3 py-1.5 rounded-lg font-medium transition-colors whitespace-nowrap">
+              Exportar CSV
+            </button>
+          </div>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm text-left">
