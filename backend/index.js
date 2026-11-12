@@ -188,23 +188,22 @@ const THINGSPEAK_API_KEY = 'J92EB8NUEOJF1IAN';
 
 const fetchThingSpeakData = async () => {
   try {
-    const url = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds.json?api_key=${THINGSPEAK_API_KEY}&results=1`;
+    const url = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds.json?api_key=${THINGSPEAK_API_KEY}&results=10`;
     const response = await axios.get(url);
     const feeds = response.data.feeds;
-    
+
     if (feeds && feeds.length > 0) {
-      const latest = feeds[0];
-      if (latest.field1 && latest.field2) {
-        // Formatear fecha para MySQL
-        const dateObj = new Date(latest.created_at);
-        const mysqlDate = dateObj.toISOString().slice(0, 19).replace('T', ' ');
-        
-        await db.execute(
+      let inserted = 0;
+      for (const feed of feeds) {
+        if (!feed.field1 || !feed.field2) continue;
+        const mysqlDate = new Date(feed.created_at).toISOString().slice(0, 19).replace('T', ' ');
+        const [result] = await db.execute(
           'INSERT IGNORE INTO readings (temperatura, humedad, timestamp) VALUES (?, ?, ?)',
-          [parseFloat(latest.field1), parseFloat(latest.field2), mysqlDate]
+          [parseFloat(feed.field1), parseFloat(feed.field2), mysqlDate]
         );
-        console.log(`[Worker] Dato insertado/ignorado: Temp=${latest.field1}, Hum=${latest.field2} at ${mysqlDate}`);
+        if (result.affectedRows > 0) inserted++;
       }
+      console.log(`[Worker] Procesados ${feeds.length} feeds, insertados ${inserted} nuevos.`);
     }
   } catch (error) {
     console.error('[Worker] Error fetching from ThingSpeak:', error.message);
