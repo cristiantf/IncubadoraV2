@@ -20,13 +20,14 @@ Sistema completo de monitoreo y control para incubadora de huevos, con hardware 
                        │ HTTPS API (ThingSpeak)
 ┌──────────────────────▼──────────────────────────────────────┐
 │  Backend Node.js + Express  (localhost:3001)                 │
-│  Worker: Sincroniza ThingSpeak → MySQL cada 60s              │
-│  API REST: Auth JWT, Usuarios CRUD, Settings, Readings       │
+│  Worker: ThingSpeak → MySQL cada 60s (results=10)           │
+│  Alert engine: evalúa umbrales por lectura                  │
+│  API REST: Auth JWT, Usuarios, Settings, Readings, Alerts   │
 └──────────────────────┬──────────────────────────────────────┘
-                       │ HTTP Axios
+                       │ HTTP Axios + Telegram Bot API
 ┌──────────────────────▼──────────────────────────────────────┐
 │  Frontend Vue 3 + Vite + Tailwind CSS  (localhost:8080)      │
-│  Dashboard en tiempo real, gráficas, gestión de usuarios     │
+│  Dashboard, gráficas, historial alertas, exportar CSV        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,9 +40,13 @@ Sistema completo de monitoreo y control para incubadora de huevos, con hardware 
 | 🔐 **Autenticación** | Login con JWT, roles ADMIN / CLIENTE |
 | 👥 **Gestión de Usuarios** | Crear, Editar (modal), Eliminar |
 | 📡 **Estado del ESP32** | Indicador Online / Desconectado en tiempo real |
-| 🌡️ **Lecturas en Vivo** | Temperatura y Humedad del sensor DHT11 |
+| 🌡️ **Lecturas en Vivo** | Temperatura y Humedad, zona horaria Ecuador |
 | 📈 **Gráficas Históricas** | Chart.js con historial paginado |
 | 🚨 **Alertas de Rango** | Visual + Sonora cuando T°/Hr salen del límite |
+| 🗃️ **Registro de Alertas** | Tabla `alert_events` en servidor: inicio, fin, duración, valor extremo |
+| 📲 **Notificaciones Telegram** | Mensaje al teléfono al abrir y cerrar cada alerta |
+| 📥 **Sin pérdida de lecturas** | Worker pide 10 resultados por ciclo; `backfill.js` carga el historial completo |
+| 📤 **Exportar CSV** | Lecturas y alertas con filtros de fecha, en hora Ecuador (solo ADMIN) |
 | 🐔 **Guía de Incubación** | Tablas diarias por tipo de ave (Gallina, Codorniz, Ganso, Pavo, Pato) |
 | 🔄 **Control de Ciclo** | Iniciar/Detener ciclo de incubación por ave |
 | ⚙️ **Configuración de Alarmas** | Umbrales de temperatura y humedad configurables |
@@ -55,8 +60,9 @@ Sistema completo de monitoreo y control para incubadora de huevos, con hardware 
 | Hardware | ESP32, Sensor DHT11, LEDs |
 | Conectividad | WiFiManager, ThingSpeak API |
 | Base de Datos | MySQL / MariaDB (via XAMPP) |
-| Backend | Node.js 20+, Express, bcrypt, jsonwebtoken, axios |
+| Backend | Node.js 20+, Express, bcrypt, jsonwebtoken, axios, dotenv |
 | Frontend | Vue 3, Vite, Tailwind CSS, Chart.js, Vue Router, Axios |
+| Notificaciones | Telegram Bot API |
 
 ---
 
@@ -72,9 +78,22 @@ Sistema completo de monitoreo y control para incubadora de huevos, con hardware 
 Get-Content init.sql | & "C:\xampp\mysql\bin\mysql.exe" -u root
 Get-Content settings.sql | & "C:\xampp\mysql\bin\mysql.exe" -u root
 Get-Content alter.sql | & "C:\xampp\mysql\bin\mysql.exe" -u root
+Get-Content alert_events.sql | & "C:\xampp\mysql\bin\mysql.exe" -u root
+Get-Content alert_events_telegram.sql | & "C:\xampp\mysql\bin\mysql.exe" -u root
 ```
 
-### 2. Iniciar el Backend
+### 2. Configurar Variables de Entorno
+```bash
+# Copia la plantilla y rellena con tus credenciales de Telegram
+cp backend/.env.example backend/.env
+```
+Edita `backend/.env`:
+```
+TELEGRAM_BOT_TOKEN=<token del bot de BotFather>
+TELEGRAM_CHAT_ID=<tu chat id>
+```
+
+### 3. Iniciar el Backend
 ```bash
 cd backend
 npm install      # solo la primera vez
@@ -82,7 +101,14 @@ node index.js
 # → Escuchando en http://localhost:3001
 ```
 
-### 3. Iniciar el Frontend
+### 4. Cargar historial de ThingSpeak (una sola vez)
+```bash
+cd backend
+node backfill.js
+# → Carga todas las lecturas desde el 12/11/2026
+```
+
+### 5. Iniciar el Frontend
 ```bash
 # Desde la raíz del proyecto
 npm install      # solo la primera vez
@@ -109,7 +135,7 @@ Haz doble clic en **`iniciar_sistema.bat`** para abrir el backend y frontend en 
 ## 📡 Configuración del ESP32
 
 El sketch `codigoesp32.ino` requiere:
-1. **Librería WiFiManager** – Genera un punto de acceso `ESP32-DHT11` (clave: `12345678`) en el primer arranque para configurar el Wi-Fi sin reprogramar.
+1. **Librería WiFiManager** – Genera un punto de acceso `ESP32-Incubadora` en el primer arranque.
 2. **Sensor DHT11** conectado al **GPIO 27**
 3. **LED Verde** en GPIO 26 (confirmación de envío exitoso)
 4. **LED Rojo** en GPIO 25 (indicador de lectura / error)
@@ -120,23 +146,27 @@ El sketch `codigoesp32.ino` requiere:
 ## 📂 Estructura del Repositorio
 
 ```
-├── backend/            # API REST y Worker (Node.js + Express)
-│   ├── index.js        # Punto de entrada: rutas y worker ThingSpeak
-│   ├── db.js           # Conexión a MySQL
-│   └── reset-admin.js  # Script para resetear contraseña de admin
-├── src/                # Frontend (Vue 3 + Vite)
+├── backend/                    # API REST y Worker (Node.js + Express)
+│   ├── index.js                # Rutas, worker ThingSpeak y motor de alertas
+│   ├── db.js                   # Pool MySQL con timezone UTC
+│   ├── backfill.js             # Carga historial completo desde ThingSpeak
+│   ├── .env.example            # Plantilla de variables de entorno
+│   └── reset-admin.js          # Script para resetear contraseña de admin
+├── src/                        # Frontend (Vue 3 + Vite)
 │   ├── components/
-│   │   ├── Dashboard.vue    # Panel principal con datos en vivo
-│   │   ├── AdminUsers.vue   # Gestión de usuarios (con modal de edición)
-│   │   └── Login.vue        # Formulario de autenticación
-│   ├── router.js            # Rutas con guardias de autenticación
-│   └── main.js              # Interceptor Axios global (401 → logout)
-├── docs/               # Documentación técnica del proyecto
-├── codigoesp32.ino     # Sketch de Arduino para ESP32 + DHT11
-├── init.sql            # Creación de la base de datos y tablas
-├── settings.sql        # Configuración inicial de parámetros
-├── alter.sql           # Migraciones de la base de datos
-└── iniciar_sistema.bat # Script de inicio rápido
+│   │   ├── Dashboard.vue       # Panel principal, alertas, CSV export
+│   │   ├── AdminUsers.vue      # Gestión de usuarios (modal de edición)
+│   │   └── Login.vue           # Formulario de autenticación
+│   ├── router.js               # Rutas con guardias de autenticación
+│   └── main.js                 # Interceptor Axios global (401 → logout)
+├── docs/                       # Documentación técnica del proyecto
+├── codigoesp32.ino             # Sketch de Arduino para ESP32 + DHT11
+├── init.sql                    # Creación de la base de datos y tablas base
+├── settings.sql                # Configuración inicial de parámetros
+├── alter.sql                   # Migración: start_date y bird_type
+├── alert_events.sql            # Migración: tabla alert_events
+├── alert_events_telegram.sql   # Migración: columna telegram_sent_at
+└── iniciar_sistema.bat         # Script de inicio rápido
 ```
 
 ---
